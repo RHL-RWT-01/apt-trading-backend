@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Orders — Admin UI</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --muted: #68707a;
+      --accent: #2563eb;
+      --danger: #ef4444;
+      --success: #10b981;
+      --radius: 8px;
+      --maxw: 920px;
+      --pad: 14px;
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    body { background: var(--bg); color: #0f172a; margin: 24px; display: flex; justify-content: center; }
+    .container { width: 100%; max-width: var(--maxw); }
+    header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 18px; }
+    h1 { font-size: 20px; margin:0; }
+    .row { display:flex; gap:12px; align-items:center; }
+    .card { background: var(--card); border-radius: var(--radius); padding: var(--pad); box-shadow: 0 1px 3px rgba(15,23,42,0.06); }
+    form { display:flex; gap:10px; flex-wrap:wrap; }
+    input[type="text"], select { padding:10px; border-radius:6px; border:1px solid #e6e9ef; min-width: 160px; }
+    button { padding:10px 12px; border-radius:6px; border: none; cursor:pointer; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-ghost { background: transparent; border:1px solid #e6e9ef; }
+    .grid { display:grid; grid-template-columns: 1fr 320px; gap:14px; }
+    .orders-list { max-height: 68vh; overflow:auto; padding:8px; }
+    .order { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:10px; border-radius:6px; margin-bottom:8px; border:1px solid #eef2ff; background: linear-gradient(180deg,#fff,#fbfdff); }
+    .meta { color: var(--muted); font-size: 13px; }
+    .actions { display:flex; gap:8px; }
+    .small { font-size: 13px; padding:6px 8px; border-radius:6px; border: none; cursor:pointer; }
+    .small.danger { background: var(--danger); color: #fff; }
+    .small.success { background: var(--success); color: #fff; }
+    .events { max-height: 68vh; overflow:auto; padding:8px; }
+    .event { font-family: monospace; font-size:12px; padding:8px; border-radius:6px; background:#fff; border:1px solid #eee; margin-bottom:8px; }
+    footer { margin-top: 12px; color: var(--muted); font-size: 13px; }
+    .status-pill { padding:6px 8px; border-radius:999px; font-weight:600; font-size:12px; }
+    .status-pending { background:#fef3c7; color:#92400e; }
+    .status-shipped { background:#dbf0ff; color:#044e6b; }
+    .status-delivered { background:#e6ffef; color:#064e3b; }
+    @media (max-width: 880px) {
+      .grid { grid-template-columns: 1fr; }
+      header { flex-direction: column; align-items: flex-start; gap:8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Orders — Admin UI</h1>
+        <div class="meta">Create, update, delete orders & observe real-time DB changes</div>
+      </div>
+      <div class="row">
+        <button id="refreshBtn" class="btn-ghost">Refresh List</button>
+        <button id="connectBtn" class="btn-primary">Connect (Realtime)</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <form id="createForm" class="mb-6" style="margin-bottom:12px;">
+          <input id="customerName" placeholder="Customer name" required />
+          <input id="productName" placeholder="Product name" required />
+          <select id="status">
+            <option value="pending">pending</option>
+            <option value="shipped">shipped</option>
+            <option value="delivered">delivered</option>
+          </select>
+          <button class="btn-primary" type="submit">Add Order</button>
+        </form>
+
+        <div style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+          <strong>Orders</strong>
+          <div class="meta" id="ordersCount">—</div>
+        </div>
+
+        <div class="orders-list" id="ordersList"></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong>Realtime Events</strong>
+          <div class="meta">Live DB changes</div>
+        </div>
+        <div class="events" id="eventsLog"></div>
+      </div>
+    </div>
+
+    <footer>
+      <div>Notes: Ensure the backend server is running and CORS/socket origins allow this page.</div>
+    </footer>
+  </div>
+
+  <!-- Socket.IO CDN -->
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  <script>
+    const SERVER_URL = 'http://localhost:3000'; 
+
+    const ordersList = document.getElementById('ordersList');
+    const ordersCount = document.getElementById('ordersCount');
+    const eventsLog = document.getElementById('eventsLog');
+    const createForm = document.getElementById('createForm');
+    const customerName = document.getElementById('customerName');
+    const productName = document.getElementById('productName');
+    const statusSelect = document.getElementById('status');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const connectBtn = document.getElementById('connectBtn');
+
+    let socket = null;
+    let connected = false;
+    const api = (path, opts = {}) => fetch(`${SERVER_URL}/api/${path}`, { headers: { 'Content-Type': 'application/json' }, ...opts });
+
+    async function loadOrders() {
+      try {
+        const res = await api('orders');
+        const orders = await res.json();
+        renderOrders(orders || []);
+      } catch (err) {
+        appendEvent('Error fetching orders: ' + err.message);
+      }
+    }
+
+    function renderOrders(orders) {
+      ordersList.innerHTML = '';
+      ordersCount.textContent = orders.length + ' orders';
+      if (orders.length === 0) {
+        ordersList.innerHTML = '<div class="meta">No orders yet</div>';
+        return;
+      }
+      orders.forEach(o => {
+        const el = document.createElement('div');
+        el.className = 'order';
+
+        const left = document.createElement('div');
+        left.style.flex = '1';
+        left.innerHTML = `<div style="font-weight:600">${escapeHtml(o.customer_name)} — ${escapeHtml(o.product_name)}</div>
+          <div class="meta">ID: ${o._id} • ${new Date(o.updated_at || o.updatedAt || o.createdAt).toLocaleString()}</div>`;
+
+        const right = document.createElement('div');
+        right.className = 'actions';
+
+        const status = document.createElement('div');
+        status.className = 'status-pill ' + statusClass(o.status);
+        status.textContent = o.status;
+
+        const sel = document.createElement('select');
+        ['pending','shipped','delivered'].forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s;
+          opt.text = s;
+          if (s === o.status) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        sel.onchange = () => updateOrderStatus(o._id, sel.value);
+
+        const btnDelete = document.createElement('button');
+        btnDelete.className = 'small danger';
+        btnDelete.textContent = 'Delete';
+        btnDelete.onclick = () => deleteOrder(o._id);
+
+        right.appendChild(status);
+        right.appendChild(sel);
+        right.appendChild(btnDelete);
+
+        el.appendChild(left);
+        el.appendChild(right);
+        ordersList.appendChild(el);
+      });
+    }
+
+    function statusClass(s) {
+      if (s === 'pending') return 'status-pending';
+      if (s === 'shipped') return 'status-shipped';
+      if (s === 'delivered') return 'status-delivered';
+      return '';
+    }
+
+    async function createOrder(e) {
+      e.preventDefault();
+      const payload = {
+        customer_name: customerName.value.trim(),
+        product_name: productName.value.trim(),
+        status: statusSelect.value
+      };
+      if (!payload.customer_name || !payload.product_name) {
+        appendEvent('Please provide customer & product names.');
+        return;
+      }
+      try {
+        const res = await api('orders', { method:'POST', body: JSON.stringify(payload) });
+        if (!res.ok) throw new Error('Create failed: ' + (await res.text()));
+        const order = await res.json();
+        appendEvent('Created order: ' + order._id);
+        customerName.value = '';
+        productName.value = '';
+        await loadOrders();
+      } catch (err) {
+        appendEvent('Create error: ' + err.message);
+      }
+    }
+
+    async function updateOrderStatus(id, newStatus) {
+      try {
+        const res = await api(`orders/${id}`, { method:'PUT', body: JSON.stringify({ status: newStatus }) });
+        if (!res.ok) throw new Error('Update failed');
+        const updated = await res.json();
+        appendEvent(`Updated ${id} -> ${updated.status}`);
+        await loadOrders();
+      } catch (err) {
+        appendEvent('Update error: ' + err.message);
+      }
+    }
+
+    async function deleteOrder(id) {
+      if (!confirm('Delete order ' + id + '?')) return;
+      try {
+        const res = await api(`orders/${id}`, { method:'DELETE' });
+        if (!res.ok) throw new Error('Delete failed');
+        appendEvent('Deleted ' + id);
+        await loadOrders();
+      } catch (err) {
+        appendEvent('Delete error: ' + err.message);
+      }
+    }
+
+    function appendEvent(text, obj) {
+      const el = document.createElement('div');
+      el.className = 'event';
+      const time = new Date().toLocaleTimeString();
+      el.innerHTML = `<div style="font-weight:600">${escapeHtml(time)}</div>
+        <div style="margin-top:6px;">${escapeHtml(String(text))}</div>
+        ${obj ? `<pre style="margin-top:8px">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>` : ''}`;
+      eventsLog.insertBefore(el, eventsLog.firstChild);
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      return s.replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+    }
+
+    function connectRealtime() {
+      if (connected) {
+        disconnectRealtime();
+        return;
+      }
+      try {
+        socket = io(SERVER_URL, { transports: ['websocket','polling'] });
+      } catch (err) {
+        appendEvent('Socket.IO init error: ' + err.message);
+        return;
+      }
+
+      socket.on('connect', () => {
+        connected = true;
+        connectBtn.textContent = 'Disconnect (Realtime)';
+        appendEvent('Socket connected: ' + socket.id);
+        socket.emit('get_initial'); 
+      });
+
+      socket.on('initial_list', (orders) => {
+        appendEvent('Received initial list via socket', orders);
+      });
+
+      socket.on('orders_change', (payload) => {
+        appendEvent('DB change: ' + payload.operationType, payload);
+        loadOrders().catch(()=>{});
+      });
+
+      socket.on('disconnect', (reason) => {
+        connected = false;
+        connectBtn.textContent = 'Connect (Realtime)';
+        appendEvent('Socket disconnected: ' + reason);
+      });
+
+      socket.on('connect_error', (err) => appendEvent('Socket connect_error: ' + err.message));
+    }
+
+    function disconnectRealtime() {
+      if (!socket) return;
+      socket.disconnect();
+      socket = null;
+      connected = false;
+      connectBtn.textContent = 'Connect (Realtime)';
+      appendEvent('Socket disconnected (manual)');
+    }
+
+    createForm.addEventListener('submit', createOrder);
+    refreshBtn.addEventListener('click', loadOrders);
+    connectBtn.addEventListener('click', connectRealtime);
+
+    loadOrders();
+
+  </script>
+</body>
+</html>
